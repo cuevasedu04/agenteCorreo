@@ -1,0 +1,156 @@
+"""
+Agente de correo ANAM -- envio de constancias por Outlook COM.
+
+Corre LOCAL en la computadora de cada usuario, NO en el servidor central.
+El sistema web (pantalla "Generador masivo") le habla directo por
+localhost para pedirle que envie un correo; este agente es el UNICO lugar
+que de verdad toca Outlook. El backend central (Django) nunca ve el PDF ni
+intenta enviar nada el mismo -- solo recibe, al final, un aviso de si
+salio bien o mal, para la bitacora de auditoria (ver
+credencializacionBack/credencializacion/views.py, CorreoConstanciaEnviarView).
+
+Por que un programa aparte y no parte de Django: Outlook COM (pywin32) solo
+puede controlar el Outlook que esta abierto en la MISMA maquina donde corre
+el proceso. Si el backend central viviera en una sola maquina, solo esa
+maquina podria enviar -- sin importar desde que computadora entrara cada
+usuario al navegador. Con este agente, cada quien envia con su propio
+Outlook, en su propia maquina, con los buzones que YA tiene agregados a su
+perfil (nadie mas necesita saber cuales son).
+
+Requiere:
+  - Windows, con Outlook instalado y abierto (sesion iniciada) durante todo
+    el envio.
+  - pip install -r requirements.txt
+
+Uso:
+  python agente_correo.py
+  (deja la ventana abierta mientras se hacen envios desde el sistema web)
+
+Empaquetado como .exe (opcional, para no pedirle a cada usuario que instale
+Python): ver README.md.
+"""
+import os
+import tempfile
+
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+
+PUERTO = 8877
+
+app = Flask(__name__)
+# Sin restriccion de origen ni de headers: el sistema web puede estar
+# servido desde un dominio distinto a localhost (el servidor central), y su
+# HttpClient manda un header 'authorization' en TODAS sus peticiones (ver
+# TokenInterceptor del frontend) -- sin allow_headers='*' el navegador
+# bloquearia el preflight antes de que la peticion llegara aqui. No es un
+# riesgo de seguridad relevante: el agente solo escucha en 127.0.0.1, asi
+# que nadie fuera de ESTA maquina puede llegar a el sin importar el CORS.
+CORS(app, origins='*', allow_headers='*')
+
+
+class ErrorEnvioCorreo(Exception):
+    """Outlook no disponible, buzon no encontrado, o Exchange rechazo el envio."""
+
+
+@app.route('/salud', methods=['GET'])
+def salud():
+    """El frontend lo consulta antes de enviar, para avisar con un mensaje claro si el agente no esta corriendo en vez de fallar con un error de red generico."""
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/enviar', methods=['POST'])
+def enviar():
+    destinatario = (request.form.get('destinatario') or '').strip()
+    asunto = request.form.get('asunto') or ''
+    cuerpo_html = request.form.get('cuerpo_html') or ''
+    cuenta_remitente = (request.form.get('cuenta_remitente') or '').strip()
+    archivo_pdf = request.files.get('pdf')
+
+    if not destinatario:
+        return jsonify({'status': 'error', 'mensaje': 'Falta el destinatario.'}), 400
+    if not archivo_pdf:
+        return jsonify({'status': 'error', 'mensaje': 'Falta el PDF de la constancia.'}), 400
+
+    with tempfile.TemporaryDirectory() as carpeta_tmp:
+        ruta_pdf = os.path.join(carpeta_tmp, archivo_pdf.filename or 'Constancia.pdf')
+        archivo_pdf.save(ruta_pdf)
+
+        try:
+            _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
+        except ErrorEnvioCorreo as exc:
+            return jsonify({'status': 'error', 'mensaje': str(exc)}), 502
+
+    return jsonify({'status': 'success'})
+
+
+def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf):
+    """
+    Mismo patron que el script existente de RH para recibos de nomina
+    (recibos_nomina.py): buzon compartido via SentOnBehalfOfName, adjunto
+    por ruta de archivo en disco, Outlook/Exchange gestionan la entrega de
+    principio a fin. Este agente nunca guarda ni usa contrasenas de correo.
+    """
+    try:
+        import win32com.client
+    except ImportError as exc:
+        raise ErrorEnvioCorreo(
+            'Este agente debe correr en Windows con pywin32 instalado '
+            '(pip install pywin32).'
+        ) from exc
+
+    try:
+        outlook = win32com.client.Dispatch('Outlook.Application')
+    except Exception as exc:
+        raise ErrorEnvioCorreo(
+            'No se pudo conectar con Outlook. Verifica que esté instalado y '
+            'abierto en esta máquina, con la sesión iniciada, durante todo '
+            'el envío.'
+        ) from exc
+
+    carpeta_enviados = None
+    if cuenta_remitente:
+        carpeta_enviados = _buscar_carpeta_buzon(outlook, cuenta_remitente)
+        if not carpeta_enviados:
+            raise ErrorEnvioCorreo(
+                f"No se encontró la cuenta «{cuenta_remitente}» en Outlook. "
+                'Verifica que el buzón esté agregado a tu perfil de Outlook y '
+                'que el nombre o correo coincida exactamente.'
+            )
+
+    try:
+        mail = outlook.CreateItem(0)  # olMailItem
+        mail.To = destinatario
+        mail.Subject = asunto
+        if cuenta_remitente:
+            mail.SentOnBehalfOfName = cuenta_remitente
+        mail.HTMLBody = cuerpo_html
+        mail.Attachments.Add(Source=ruta_pdf)
+        if carpeta_enviados:
+            mail.SaveSentMessageFolder = carpeta_enviados
+        mail.Send()
+    except Exception as exc:
+        raise ErrorEnvioCorreo(f'Outlook rechazó el envío: {exc}') from exc
+
+
+def _buscar_carpeta_buzon(outlook, cuenta: str):
+    """
+    Busca `cuenta` (DisplayName o correo del buzón) entre los Stores ya
+    agregados al perfil de Outlook abierto y regresa su carpeta de
+    Elementos enviados. None si no está agregado.
+    """
+    termino = cuenta.strip().lower()
+    for store in outlook.Session.Stores:
+        nombre = (store.DisplayName or '').strip().lower()
+        if termino == nombre or termino in nombre:
+            try:
+                return store.GetDefaultFolder(5)  # olFolderSentMail
+            except Exception:
+                return None
+    return None
+
+
+if __name__ == '__main__':
+    print(f'Agente de correo ANAM escuchando en http://127.0.0.1:{PUERTO}')
+    print('Deja esta ventana abierta mientras envías constancias desde el sistema web.')
+    print('Ciérrala cuando termines de enviar.')
+    app.run(host='127.0.0.1', port=PUERTO)
