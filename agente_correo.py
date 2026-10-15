@@ -37,6 +37,15 @@ from flask_cors import CORS
 
 PUERTO = 8877
 
+# Version que reporta /salud. El sistema web la compara contra
+# VERSION_AGENTE_SIN_ADJUNTO (agente-correo.service.ts) para saber si este
+# agente puede mandar correos SIN adjunto.
+#   1 -- solo constancias (PDF obligatorio). Los agentes viejos no reportaban
+#        version; el sistema los trata como 1.
+#   2 -- el PDF es opcional: enlaces al cuestionario de un curso y avisos a
+#        quienes no aprobaron van como correo de puro texto.
+VERSION = 2
+
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
 # servido desde un dominio distinto a localhost (el servidor central), y su
@@ -55,7 +64,7 @@ class ErrorEnvioCorreo(Exception):
 @app.route('/salud', methods=['GET'])
 def salud():
     """El frontend lo consulta antes de enviar, para avisar con un mensaje claro si el agente no esta corriendo en vez de fallar con un error de red generico."""
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok', 'version': VERSION})
 
 
 @app.route('/enviar', methods=['POST'])
@@ -68,12 +77,17 @@ def enviar():
 
     if not destinatario:
         return jsonify({'status': 'error', 'mensaje': 'Falta el destinatario.'}), 400
-    if not archivo_pdf:
-        return jsonify({'status': 'error', 'mensaje': 'Falta el PDF de la constancia.'}), 400
 
+    # El PDF es opcional (version 2): las constancias lo traen, los enlaces
+    # al cuestionario y los avisos a reprobados no.
     with tempfile.TemporaryDirectory() as carpeta_tmp:
-        ruta_pdf = os.path.join(carpeta_tmp, archivo_pdf.filename or 'Constancia.pdf')
-        archivo_pdf.save(ruta_pdf)
+        ruta_pdf = None
+        if archivo_pdf:
+            # basename: el nombre lo manda el navegador y no debe poder
+            # escribir fuera de la carpeta temporal.
+            nombre = os.path.basename(archivo_pdf.filename or '') or 'Constancia.pdf'
+            ruta_pdf = os.path.join(carpeta_tmp, nombre)
+            archivo_pdf.save(ruta_pdf)
 
         try:
             _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
@@ -83,7 +97,7 @@ def enviar():
     return jsonify({'status': 'success'})
 
 
-def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf):
+def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf=None):
     """
     Mismo patron que el script existente de RH para recibos de nomina
     (recibos_nomina.py): buzon compartido via SentOnBehalfOfName, adjunto
@@ -124,7 +138,8 @@ def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, rut
         if cuenta_remitente:
             mail.SentOnBehalfOfName = cuenta_remitente
         mail.HTMLBody = cuerpo_html
-        mail.Attachments.Add(Source=ruta_pdf)
+        if ruta_pdf:
+            mail.Attachments.Add(Source=ruta_pdf)
         if carpeta_enviados:
             mail.SaveSentMessageFolder = carpeta_enviados
         mail.Send()
@@ -150,7 +165,7 @@ def _buscar_carpeta_buzon(outlook, cuenta: str):
 
 
 if __name__ == '__main__':
-    print(f'Agente de correo ANAM escuchando en http://127.0.0.1:{PUERTO}')
+    print(f'Agente de correo ANAM v{VERSION} escuchando en http://127.0.0.1:{PUERTO}')
     print('Deja esta ventana abierta mientras envías constancias desde el sistema web.')
     print('Ciérrala cuando termines de enviar.')
     app.run(host='127.0.0.1', port=PUERTO)
