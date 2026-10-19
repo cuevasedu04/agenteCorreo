@@ -31,6 +31,7 @@ Python): ver README.md.
 """
 import os
 import tempfile
+import threading
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -54,7 +55,16 @@ app = Flask(__name__)
 # bloquearia el preflight antes de que la peticion llegara aqui. No es un
 # riesgo de seguridad relevante: el agente solo escucha en 127.0.0.1, asi
 # que nadie fuera de ESTA maquina puede llegar a el sin importar el CORS.
-CORS(app, origins='*', allow_headers='*')
+# allow_private_network: Chrome/Edge (Private Network Access) exigen
+# 'Access-Control-Allow-Private-Network: true' en el preflight cuando una
+# pagina servida desde otro dominio llama a localhost.
+CORS(app, origins='*', allow_headers='*', allow_private_network=True)
+
+# Outlook COM no tolera bien llamadas concurrentes desde varios hilos; el
+# servidor de Flask atiende cada peticion en un hilo distinto, asi que los
+# envios se serializan.
+_candado_outlook = threading.Lock()
+
 
 
 class ErrorEnvioCorreo(Exception):
@@ -90,7 +100,8 @@ def enviar():
             archivo_pdf.save(ruta_pdf)
 
         try:
-            _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
+            with _candado_outlook:
+                _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
         except ErrorEnvioCorreo as exc:
             return jsonify({'status': 'error', 'mensaje': str(exc)}), 502
 
@@ -105,6 +116,7 @@ def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, rut
     principio a fin. Este agente nunca guarda ni usa contrasenas de correo.
     """
     try:
+        import pythoncom
         import win32com.client
     except ImportError as exc:
         raise ErrorEnvioCorreo(
@@ -112,8 +124,19 @@ def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, rut
             '(pip install pywin32).'
         ) from exc
 
+    # Cada peticion corre en un hilo del servidor que no es el principal; COM
+    # debe inicializarse en ESE hilo o Dispatch falla con "CoInitialize has
+    # not been called".
+    pythoncom.CoInitialize()
     try:
-        outlook = win32com.client.Dispatch('Outlook.Application')
+        _enviar_con_com(win32com.client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf):
+    try:
+        outlook = win32com_client.Dispatch('Outlook.Application')
     except Exception as exc:
         raise ErrorEnvioCorreo(
             'No se pudo conectar con Outlook. Verifica que esté instalado y '
@@ -154,13 +177,17 @@ def _buscar_carpeta_buzon(outlook, cuenta: str):
     Elementos enviados. None si no está agregado.
     """
     termino = cuenta.strip().lower()
-    for store in outlook.Session.Stores:
-        nombre = (store.DisplayName or '').strip().lower()
-        if termino == nombre or termino in nombre:
-            try:
-                return store.GetDefaultFolder(5)  # olFolderSentMail
-            except Exception:
-                return None
+    stores = list(outlook.Session.Stores)
+    # Primero coincidencia exacta; solo si no hay, coincidencia parcial. Asi
+    # "rh" no se queda con el primer buzon cuyo nombre contenga "rh" cuando
+    # existe uno llamado exactamente "rh".
+    exactos = [s for s in stores if (s.DisplayName or '').strip().lower() == termino]
+    parciales = [s for s in stores if termino in (s.DisplayName or '').strip().lower()]
+    for store in exactos or parciales:
+        try:
+            return store.GetDefaultFolder(5)  # olFolderSentMail
+        except Exception:
+            continue
     return None
 
 
@@ -168,4 +195,4 @@ if __name__ == '__main__':
     print(f'Agente de correo ANAM v{VERSION} escuchando en http://127.0.0.1:{PUERTO}')
     print('Deja esta ventana abierta mientras envías constancias desde el sistema web.')
     print('Ciérrala cuando termines de enviar.')
-    app.run(host='127.0.0.1', port=PUERTO)
+    app.run(host='127.0.0.1', port=PUERTO, threaded=True)
