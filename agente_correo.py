@@ -47,7 +47,8 @@ PUERTO = 8877
 #        quienes no aprobaron van como correo de puro texto.
 #   3 -- estabilidad: COM inicializado por hilo, envios serializados, CORS de
 #        red privada (Chrome/Edge) y busqueda de buzon exacta antes que parcial.
-VERSION = 3
+#   4 -- imagenes en linea (CID) dentro del cuerpo, p. ej. el QR del cuestionario.
+VERSION = 4
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -86,6 +87,9 @@ def enviar():
     cuerpo_html = request.form.get('cuerpo_html') or ''
     cuenta_remitente = (request.form.get('cuenta_remitente') or '').strip()
     archivo_pdf = request.files.get('pdf')
+    # Version 4: imagenes que el cuerpo muestra con <img src="cid:NOMBRE">.
+    # Cada archivo se llama NOMBRE.png; el nombre sin extension es su CID.
+    imagenes_inline = request.files.getlist('inline')
 
     if not destinatario:
         return jsonify({'status': 'error', 'mensaje': 'Falta el destinatario.'}), 400
@@ -101,16 +105,25 @@ def enviar():
             ruta_pdf = os.path.join(carpeta_tmp, nombre)
             archivo_pdf.save(ruta_pdf)
 
+        rutas_inline = []
+        for imagen in imagenes_inline:
+            nombre = os.path.basename(imagen.filename or '')
+            if not nombre:
+                continue
+            ruta = os.path.join(carpeta_tmp, nombre)
+            imagen.save(ruta)
+            rutas_inline.append((ruta, os.path.splitext(nombre)[0]))
+
         try:
             with _candado_outlook:
-                _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
+                _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline)
         except ErrorEnvioCorreo as exc:
             return jsonify({'status': 'error', 'mensaje': str(exc)}), 502
 
     return jsonify({'status': 'success'})
 
 
-def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf=None):
+def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf=None, rutas_inline=()):
     """
     Mismo patron que el script existente de RH para recibos de nomina
     (recibos_nomina.py): buzon compartido via SentOnBehalfOfName, adjunto
@@ -131,12 +144,12 @@ def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, rut
     # not been called".
     pythoncom.CoInitialize()
     try:
-        _enviar_con_com(win32com.client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf)
+        _enviar_con_com(win32com.client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline)
     finally:
         pythoncom.CoUninitialize()
 
 
-def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf):
+def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline=()):
     try:
         outlook = win32com_client.Dispatch('Outlook.Application')
     except Exception as exc:
@@ -165,6 +178,12 @@ def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_r
         mail.HTMLBody = cuerpo_html
         if ruta_pdf:
             mail.Attachments.Add(Source=ruta_pdf)
+        for ruta, cid in rutas_inline:
+            # PR_ATTACH_CONTENT_ID: con el, Outlook muestra el adjunto dentro
+            # del cuerpo (donde va <img src="cid:...">) en vez de como archivo.
+            adjunto = mail.Attachments.Add(Source=ruta)
+            adjunto.PropertyAccessor.SetProperty(
+                'http://schemas.microsoft.com/mapi/proptag/0x3712001F', cid)
         if carpeta_enviados:
             mail.SaveSentMessageFolder = carpeta_enviados
         mail.Send()
