@@ -45,7 +45,9 @@ PUERTO = 8877
 #        version; el sistema los trata como 1.
 #   2 -- el PDF es opcional: enlaces al cuestionario de un curso y avisos a
 #        quienes no aprobaron van como correo de puro texto.
-VERSION = 2
+#   3 -- estabilidad: COM inicializado por hilo, envios serializados, CORS de
+#        red privada (Chrome/Edge) y busqueda de buzon exacta antes que parcial.
+VERSION = 3
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
