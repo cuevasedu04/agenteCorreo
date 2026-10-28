@@ -5,7 +5,7 @@ a = Analysis(
     ['agente_correo.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('fondo_correo/fondo_*.jpg', 'fondo_correo')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

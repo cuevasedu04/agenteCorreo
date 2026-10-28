@@ -53,8 +53,12 @@ En una máquina Windows, con las dependencias ya instaladas:
 
 ```
 pip install pyinstaller
-pyinstaller --onefile --console --name AgenteCorreoANAM agente_correo.py
+pyinstaller AgenteCorreoANAM.spec
 ```
+
+El `.spec` ya incluye las piezas del fondo de los correos
+(`fondo_correo\fondo_*.jpg`). Si se cambia `fondo_correo\original.png`, hay
+que volver a cortarla con `python generar_fondo.py` (requiere `pillow`).
 
 El ejecutable queda en `dist\AgenteCorreoANAM.exe`. Se puede copiar a
 cualquier otra computadora Windows y correr directo, sin instalar Python.

@@ -30,6 +30,8 @@ Empaquetado como .exe (opcional, para no pedirle a cada usuario que instale
 Python): ver README.md.
 """
 import os
+import re
+import sys
 import tempfile
 import threading
 
@@ -48,7 +50,9 @@ PUERTO = 8877
 #   3 -- estabilidad: COM inicializado por hilo, envios serializados, CORS de
 #        red privada (Chrome/Edge) y busqueda de buzon exacta antes que parcial.
 #   4 -- imagenes en linea (CID) dentro del cuerpo, p. ej. el QR del cuestionario.
-VERSION = 4
+#   5 -- todo correo va dentro del fondo institucional (fondo_correo/), con el
+#        texto en el recuadro de la imagen.
+VERSION = 5
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -68,6 +72,60 @@ CORS(app, origins='*', allow_headers='*', allow_private_network=True)
 # envios se serializan.
 _candado_outlook = threading.Lock()
 
+
+
+# Piezas de fondo_correo/original.png (las genera generar_fondo.py). En el
+# .exe de PyInstaller los datos viven en sys._MEIPASS, no junto al script.
+_CARPETA_FONDO = os.path.join(
+    getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'fondo_correo')
+_PIEZAS_FONDO = ('fondo_arriba', 'fondo_izquierda', 'fondo_abajo')
+
+
+def _envolver_en_fondo(cuerpo_html):
+    """
+    Pone el cuerpo del correo dentro del recuadro de la imagen institucional.
+    Regresa (html, [(ruta, cid), ...]) con las piezas a adjuntar en linea; si
+    faltan las piezas, regresa el cuerpo tal cual para no dejar de enviar.
+
+    Va con tablas e <img> en vez de background-image porque Outlook de
+    escritorio no muestra fondos CSS. El recuadro es una celda que crece con
+    el texto; la foto de la izquierda se alinea abajo para seguir pegada a
+    las ondas de la pieza inferior aunque el texto sea largo.
+    """
+    rutas = [(os.path.join(_CARPETA_FONDO, f'{cid}.jpg'), cid) for cid in _PIEZAS_FONDO]
+    if not all(os.path.isfile(ruta) for ruta, _ in rutas):
+        return cuerpo_html, []
+
+    # Una plantilla escrita como documento completo trae su propio <body>.
+    cuerpo = re.search(r'<body[^>]*>(.*)</body>', cuerpo_html, re.S | re.I)
+    contenido = cuerpo.group(1) if cuerpo else cuerpo_html
+
+    html = (
+        '<html><head><meta charset="utf-8"></head>'
+        '<body style="margin:0;padding:0;background:#ffffff;">'
+        '<table role="presentation" width="800" cellpadding="0" cellspacing="0" border="0" '
+        'style="width:800px;border-collapse:collapse;background:#eaf5f3;">'
+        '<tr><td colspan="3" style="padding:0;line-height:0;font-size:0;">'
+        '<img src="cid:fondo_arriba" width="800" height="105" alt="Sistema de Constancias de Evaluaciones" '
+        'style="display:block;border:0;width:800px;height:105px;"></td></tr>'
+        '<tr>'
+        '<td width="348" valign="bottom" bgcolor="#e8f5f4" '
+        'style="width:348px;padding:0;line-height:0;font-size:0;vertical-align:bottom;background:#e8f5f4;">'
+        '<img src="cid:fondo_izquierda" width="348" height="338" alt="" '
+        'style="display:block;border:0;width:348px;height:338px;"></td>'
+        '<td width="427" height="338" valign="top" bgcolor="#f5fbfa" '
+        'style="width:427px;height:338px;vertical-align:top;background:#f5fbfa;'
+        'border:1px solid #3b8e80;border-radius:14px;padding:20px 24px;'
+        'font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222222;line-height:1.5;">'
+        f'{contenido}</td>'
+        '<td width="25" bgcolor="#eef7f5" style="width:25px;padding:0;background:#eef7f5;">&nbsp;</td>'
+        '</tr>'
+        '<tr><td colspan="3" style="padding:0;line-height:0;font-size:0;">'
+        '<img src="cid:fondo_abajo" width="800" height="90" alt="" '
+        'style="display:block;border:0;width:800px;height:90px;"></td></tr>'
+        '</table></body></html>'
+    )
+    return html, rutas
 
 
 class ErrorEnvioCorreo(Exception):
@@ -175,10 +233,11 @@ def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_r
         mail.Subject = asunto
         if cuenta_remitente:
             mail.SentOnBehalfOfName = cuenta_remitente
+        cuerpo_html, rutas_fondo = _envolver_en_fondo(cuerpo_html)
         mail.HTMLBody = cuerpo_html
         if ruta_pdf:
             mail.Attachments.Add(Source=ruta_pdf)
-        for ruta, cid in rutas_inline:
+        for ruta, cid in [*rutas_inline, *rutas_fondo]:
             # PR_ATTACH_CONTENT_ID: con el, Outlook muestra el adjunto dentro
             # del cuerpo (donde va <img src="cid:...">) en vez de como archivo.
             adjunto = mail.Attachments.Add(Source=ruta)
