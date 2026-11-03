@@ -53,7 +53,9 @@ PUERTO = 8877
 #   5 -- todo correo va dentro del fondo institucional (fondo_correo/), con el
 #        texto en el recuadro de la imagen.
 #   6 -- el recuadro se ajusta al texto y queda centrado en su area.
-VERSION = 6
+#   7 -- con_fondo=0: el correo sale en TEXTO PLANO (cuerpo_texto), sin el
+#        fondo institucional ni formato.
+VERSION = 7
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -153,6 +155,9 @@ def enviar():
     # Version 4: imagenes que el cuerpo muestra con <img src="cid:NOMBRE">.
     # Cada archivo se llama NOMBRE.png; el nombre sin extension es su CID.
     imagenes_inline = request.files.getlist('inline')
+    # Version 7: con_fondo=0 -> texto plano (el sistema manda cuerpo_texto ya convertido).
+    texto_plano = (request.form.get('con_fondo') or '1').strip() == '0'
+    cuerpo_texto = request.form.get('cuerpo_texto') or ''
 
     if not destinatario:
         return jsonify({'status': 'error', 'mensaje': 'Falta el destinatario.'}), 400
@@ -179,14 +184,16 @@ def enviar():
 
         try:
             with _candado_outlook:
-                _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline)
+                _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline,
+                                    cuerpo_texto if texto_plano else None)
         except ErrorEnvioCorreo as exc:
             return jsonify({'status': 'error', 'mensaje': str(exc)}), 502
 
     return jsonify({'status': 'success'})
 
 
-def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf=None, rutas_inline=()):
+def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf=None, rutas_inline=(),
+                        cuerpo_texto=None):
     """
     Mismo patron que el script existente de RH para recibos de nomina
     (recibos_nomina.py): buzon compartido via SentOnBehalfOfName, adjunto
@@ -207,12 +214,14 @@ def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, rut
     # not been called".
     pythoncom.CoInitialize()
     try:
-        _enviar_con_com(win32com.client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline)
+        _enviar_con_com(win32com.client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline,
+                        cuerpo_texto)
     finally:
         pythoncom.CoUninitialize()
 
 
-def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline=()):
+def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline=(),
+                    cuerpo_texto=None):
     try:
         outlook = win32com_client.Dispatch('Outlook.Application')
     except Exception as exc:
@@ -238,11 +247,18 @@ def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_r
         mail.Subject = asunto
         if cuenta_remitente:
             mail.SentOnBehalfOfName = cuenta_remitente
-        cuerpo_html, rutas_fondo = _envolver_en_fondo(cuerpo_html)
-        mail.HTMLBody = cuerpo_html
+        if cuerpo_texto is not None:
+            # Texto plano: sin fondo, sin formato y sin imagenes en linea.
+            mail.BodyFormat = 1  # olFormatPlain
+            mail.Body = cuerpo_texto
+            rutas_cid = []
+        else:
+            cuerpo_html, rutas_fondo = _envolver_en_fondo(cuerpo_html)
+            mail.HTMLBody = cuerpo_html
+            rutas_cid = [*rutas_inline, *rutas_fondo]
         if ruta_pdf:
             mail.Attachments.Add(Source=ruta_pdf)
-        for ruta, cid in [*rutas_inline, *rutas_fondo]:
+        for ruta, cid in rutas_cid:
             # PR_ATTACH_CONTENT_ID: con el, Outlook muestra el adjunto dentro
             # del cuerpo (donde va <img src="cid:...">) en vez de como archivo.
             adjunto = mail.Attachments.Add(Source=ruta)
