@@ -52,7 +52,8 @@ PUERTO = 8877
 #   4 -- imagenes en linea (CID) dentro del cuerpo, p. ej. el QR del cuestionario.
 #   5 -- todo correo va dentro del fondo institucional (fondo_correo/), con el
 #        texto en el recuadro de la imagen.
-VERSION = 5
+#   6 -- el recuadro se ajusta al texto y queda centrado en su area.
+VERSION = 6
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -88,9 +89,10 @@ def _envolver_en_fondo(cuerpo_html):
     faltan las piezas, regresa el cuerpo tal cual para no dejar de enviar.
 
     Va con tablas e <img> en vez de background-image porque Outlook de
-    escritorio no muestra fondos CSS. El recuadro es una celda que crece con
-    el texto; la foto de la izquierda se alinea abajo para seguir pegada a
-    las ondas de la pieza inferior aunque el texto sea largo.
+    escritorio no muestra fondos CSS. El recuadro es una tabla interna del
+    tamano del texto, centrada en el area donde va el recuadro de la imagen;
+    con texto largo el area crece. La foto de la izquierda se alinea abajo
+    para seguir pegada a las ondas de la pieza inferior.
     """
     rutas = [(os.path.join(_CARPETA_FONDO, f'{cid}.jpg'), cid) for cid in _PIEZAS_FONDO]
     if not all(os.path.isfile(ruta) for ruta, _ in rutas):
@@ -113,12 +115,15 @@ def _envolver_en_fondo(cuerpo_html):
         'style="width:348px;padding:0;line-height:0;font-size:0;vertical-align:bottom;background:#e8f5f4;">'
         '<img src="cid:fondo_izquierda" width="348" height="338" alt="" '
         'style="display:block;border:0;width:348px;height:338px;"></td>'
-        '<td width="427" height="338" valign="top" bgcolor="#f5fbfa" '
-        'style="width:427px;height:338px;vertical-align:top;background:#f5fbfa;'
-        'border:1px solid #3b8e80;border-radius:14px;padding:20px 24px;'
+        '<td width="427" height="338" align="center" valign="middle" bgcolor="#f3faf9" '
+        'style="width:427px;height:338px;vertical-align:middle;text-align:center;background:#f3faf9;padding:12px 0;">'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" '
+        'style="border-collapse:separate;margin:0 auto;">'
+        '<tr><td align="left" bgcolor="#ffffff" '
+        'style="background:#ffffff;border:1px solid #3b8e80;border-radius:14px;padding:20px 24px;text-align:left;'
         'font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222222;line-height:1.5;">'
-        f'{contenido}</td>'
-        '<td width="25" bgcolor="#eef7f5" style="width:25px;padding:0;background:#eef7f5;">&nbsp;</td>'
+        f'{contenido}</td></tr></table></td>'
+        '<td width="25" bgcolor="#f3faf9" style="width:25px;padding:0;background:#f3faf9;">&nbsp;</td>'
         '</tr>'
         '<tr><td colspan="3" style="padding:0;line-height:0;font-size:0;">'
         '<img src="cid:fondo_abajo" width="800" height="90" alt="" '
@@ -271,7 +276,32 @@ def _buscar_carpeta_buzon(outlook, cuenta: str):
     return None
 
 
+def _agente_ya_abierto():
+    """
+    Version del agente que YA responde en el puerto, o None si esta libre.
+    Windows deja que dos procesos escuchen en el mismo puerto y el sistema
+    web seguiria hablando con el viejo: el nuevo no debe arrancar encima.
+    """
+    import json
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:{PUERTO}/salud', timeout=2) as r:
+            return json.loads(r.read().decode() or '{}').get('version') or 1
+    except Exception:
+        return None
+
+
 if __name__ == '__main__':
+    otro = _agente_ya_abierto()
+    if otro is not None:
+        print(f'Ya hay otro Agente de correo abierto en esta computadora (version {otro}).')
+        if otro < VERSION:
+            print('Es una version anterior: cierra su ventana (o el proceso AgenteCorreoANAM / python '
+                  'en el Administrador de tareas) y vuelve a abrir este.')
+        else:
+            print('No hace falta abrir otro: ese ya funciona.')
+        input('Presiona Enter para cerrar esta ventana...')
+        sys.exit(1)
     print(f'Agente de correo ANAM v{VERSION} escuchando en http://127.0.0.1:{PUERTO}')
     print('Deja esta ventana abierta mientras envías constancias desde el sistema web.')
     print('Ciérrala cuando termines de enviar.')
