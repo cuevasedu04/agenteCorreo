@@ -55,7 +55,10 @@ PUERTO = 8877
 #   6 -- el recuadro se ajusta al texto y queda centrado en su area.
 #   7 -- con_fondo=0: el correo sale en TEXTO PLANO (cuerpo_texto), sin el
 #        fondo institucional ni formato.
-VERSION = 7
+#   8 -- el buzon remitente se busca por correo y por nombre, entre cuentas,
+#        buzones abiertos y la libreta global; si no esta abierto en Outlook
+#        se envia igual "en nombre de" (Exchange valida el permiso).
+VERSION = 8
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -231,22 +234,18 @@ def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_r
             'el envío.'
         ) from exc
 
-    carpeta_enviados = None
-    if cuenta_remitente:
-        carpeta_enviados = _buscar_carpeta_buzon(outlook, cuenta_remitente)
-        if not carpeta_enviados:
-            raise ErrorEnvioCorreo(
-                f"No se encontró la cuenta «{cuenta_remitente}» en Outlook. "
-                'Verifica que el buzón esté agregado a tu perfil de Outlook y '
-                'que el nombre o correo coincida exactamente.'
-            )
+    remitente = _resolver_remitente(outlook, cuenta_remitente) if cuenta_remitente else None
 
     try:
         mail = outlook.CreateItem(0)  # olMailItem
         mail.To = destinatario
         mail.Subject = asunto
-        if cuenta_remitente:
-            mail.SentOnBehalfOfName = cuenta_remitente
+        if remitente and remitente['cuenta'] is not None:
+            # El buzon esta agregado como CUENTA del perfil: se envia desde ella.
+            mail.SendUsingAccount = remitente['cuenta']
+        elif remitente:
+            # Buzon compartido: "en nombre de" / "enviar como" (permiso de Exchange).
+            mail.SentOnBehalfOfName = remitente['direccion']
         if cuerpo_texto is not None:
             # Texto plano: sin fondo, sin formato y sin imagenes en linea.
             mail.BodyFormat = 1  # olFormatPlain
@@ -264,32 +263,121 @@ def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_r
             adjunto = mail.Attachments.Add(Source=ruta)
             adjunto.PropertyAccessor.SetProperty(
                 'http://schemas.microsoft.com/mapi/proptag/0x3712001F', cid)
-        if carpeta_enviados:
-            mail.SaveSentMessageFolder = carpeta_enviados
+        if remitente and remitente['enviados'] is not None:
+            mail.SaveSentMessageFolder = remitente['enviados']
         mail.Send()
     except Exception as exc:
         raise ErrorEnvioCorreo(f'Outlook rechazó el envío: {exc}') from exc
 
 
-def _buscar_carpeta_buzon(outlook, cuenta: str):
+def _smtp_de_entrada(entrada):
+    """Correo SMTP de un AddressEntry de Outlook (usuario o buzon de Exchange)."""
+    try:
+        usuario = entrada.GetExchangeUser()
+        if usuario and usuario.PrimarySmtpAddress:
+            return usuario.PrimarySmtpAddress.strip().lower()
+    except Exception:
+        pass
+    try:
+        return (entrada.Address or '').strip().lower()
+    except Exception:
+        return ''
+
+
+def _dueno_de_store(outlook, store):
+    """(nombre, correo) del dueno de un buzon abierto en Outlook, si se puede saber."""
+    PR_MAILBOX_OWNER_ENTRYID = 'http://schemas.microsoft.com/mapi/proptag/0x661B0102'
+    try:
+        entry_id = store.PropertyAccessor.GetProperty(PR_MAILBOX_OWNER_ENTRYID)
+        entrada = outlook.Session.GetAddressEntryFromID(store.PropertyAccessor.BinaryToString(entry_id))
+        return (entrada.Name or '').strip().lower(), _smtp_de_entrada(entrada)
+    except Exception:
+        return '', ''
+
+
+def _resolver_remitente(outlook, cuenta: str):
     """
-    Busca `cuenta` (DisplayName o correo del buzón) entre los Stores ya
-    agregados al perfil de Outlook abierto y regresa su carpeta de
-    Elementos enviados. None si no está agregado.
+    Resuelve el buzon desde el que se envia (`cuenta`: correo o nombre, p. ej.
+    capacitacion@anam.gob.mx o "Capacitación"). En orden:
+
+      1. Una CUENTA del perfil con ese correo/nombre -> SendUsingAccount.
+      2. Un BUZON abierto en Outlook (compartido, automapeado) cuyo nombre o
+         cuyo dueno coincida -> "en nombre de" y la copia se guarda en SUS
+         Elementos enviados.
+      3. La LIBRETA GLOBAL de direcciones: si el buzon existe en Exchange
+         aunque no este abierto en este Outlook, se envia "en nombre de" igual.
+         Exchange valida el permiso (Enviar como / Enviar en nombre de); si
+         falta, Outlook devuelve un correo de no entrega a la bandeja personal.
+
+    Antes solo se buscaba por el NOMBRE visible de los buzones abiertos: un
+    buzon compartido aparece como "Capacitación", no como su correo, y si no
+    estaba abierto el envio se cancelaba aunque Exchange lo permitiera.
     """
     termino = cuenta.strip().lower()
-    stores = list(outlook.Session.Stores)
-    # Primero coincidencia exacta; solo si no hay, coincidencia parcial. Asi
-    # "rh" no se queda con el primer buzon cuyo nombre contenga "rh" cuando
-    # existe uno llamado exactamente "rh".
-    exactos = [s for s in stores if (s.DisplayName or '').strip().lower() == termino]
-    parciales = [s for s in stores if termino in (s.DisplayName or '').strip().lower()]
+    sesion = outlook.Session
+
+    # 1) Cuentas del perfil.
+    try:
+        for acc in sesion.Accounts:
+            smtp = (getattr(acc, 'SmtpAddress', '') or '').strip().lower()
+            nombre = (acc.DisplayName or '').strip().lower()
+            if termino in (smtp, nombre):
+                enviados = None
+                try:
+                    enviados = acc.DeliveryStore.GetDefaultFolder(5)
+                except Exception:
+                    pass
+                return {'cuenta': acc, 'direccion': smtp or cuenta, 'enviados': enviados}
+    except Exception:
+        pass
+
+    # Nombre y correo reales del buzon segun la libreta global (para comparar
+    # contra los buzones abiertos, que se muestran con su nombre, no su correo).
+    nombre_gal, smtp_gal = '', ''
+    destinatario = None
+    try:
+        destinatario = sesion.CreateRecipient(cuenta)
+        if destinatario.Resolve():
+            nombre_gal = (destinatario.AddressEntry.Name or '').strip().lower()
+            smtp_gal = _smtp_de_entrada(destinatario.AddressEntry)
+        else:
+            destinatario = None
+    except Exception:
+        destinatario = None
+    direccion = smtp_gal or cuenta
+
+    # 2) Buzones abiertos: coincidencia exacta primero, luego parcial.
+    candidatos = {termino, nombre_gal, smtp_gal} - {''}
+    stores = list(sesion.Stores)
+    exactos, parciales = [], []
+    for store in stores:
+        nombre = (store.DisplayName or '').strip().lower()
+        dueno_nombre, dueno_smtp = _dueno_de_store(outlook, store)
+        if candidatos & {nombre, dueno_nombre, dueno_smtp} - {''}:
+            exactos.append(store)
+        elif termino in nombre or (nombre_gal and nombre_gal in nombre):
+            parciales.append(store)
     for store in exactos or parciales:
         try:
-            return store.GetDefaultFolder(5)  # olFolderSentMail
+            return {'cuenta': None, 'direccion': direccion, 'enviados': store.GetDefaultFolder(5)}
         except Exception:
             continue
-    return None
+
+    # 3) No esta abierto pero existe en Exchange: se envia en nombre de el. La
+    # copia va a sus Enviados si hay permiso de lectura; si no, a los propios.
+    if destinatario is not None:
+        enviados = None
+        try:
+            enviados = sesion.GetSharedDefaultFolder(destinatario, 5)
+        except Exception:
+            pass
+        return {'cuenta': None, 'direccion': direccion, 'enviados': enviados}
+
+    raise ErrorEnvioCorreo(
+        f"No se encontró el buzón «{cuenta}» ni en tu Outlook ni en la libreta de direcciones. "
+        'Revisa que el correo esté bien escrito (p. ej. capacitacion@anam.gob.mx) y que '
+        'uses el Outlook clásico (el Outlook nuevo no permite que otro programa envíe correos).'
+    )
 
 
 def _agente_ya_abierto():
