@@ -6,73 +6,49 @@ cambia la imagen original:
     pip install pillow
     python generar_fondo.py
 
-Por que en piezas y no la imagen completa de fondo: Outlook de escritorio
-(motor de Word) no muestra background-image, y el texto de cada correo mide
-distinto. Con piezas, el recuadro es una celda HTML que crece con el texto.
+Por que en piezas y no la imagen completa de fondo: el texto de cada correo
+mide distinto. La franja del medio es una celda que crece con el texto, con
+fondo_medio (las ondas) detras de toda ella y la foto encima. Con texto de
+tamano normal las piezas encajan como la imagen original; con texto largo las
+ondas se estiran y sobre la foto se ven ondas en vez de un bloque liso.
 """
 import os
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 CARPETA = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fondo_correo')
 
 # Al doble del tamano en que se muestra (800 px de ancho) para que se vea
 # nitido en pantallas de alta densidad.
 ANCHO, ALTO = 1600, 1066
-ALTO_ARRIBA = 210      # hasta el borde superior del recuadro
-ALTO_MEDIO = 676       # alto del recuadro
-ANCHO_IZQUIERDA = 696  # hasta el borde izquierdo del recuadro
-FILAS_TITULO = 6       # filas de la pieza izquierda que alcanzan al titulo
-
-# El recuadro dibujado en la imagen se borra: el del correo es una tabla del
-# tamano del texto, centrada en un area de color liso (COLOR_AREA, el mismo
-# bgcolor de _envolver_en_fondo). Las orillas de las piezas que tocan esa
-# area se difuminan hacia ese color para que no se note la union.
-COLOR_AREA = (243, 250, 249)  # #f3faf9
-FUNDIDO_ARRIBA = 35    # filas sobre el recuadro que se funden al color
-FIN_SOMBRA = 896       # ultima fila de la sombra del recuadro original
-FUNDIDO_ABAJO = 30     # filas bajo la sombra que se funden al color
-FUNDIDO_IZQUIERDA = 20  # columnas de la pieza izquierda que se funden
+ALTO_ARRIBA = 210      # entre el titulo (termina en y=207) y la foto (y=227)
+ALTO_MEDIO = 676       # alto de la franja del medio
+ANCHO_IZQUIERDA = 720  # justo despues del arco dorado (termina en x=686)
+FILAS_UNION = 4        # filas de fondo_medio que repiten el pie de la foto
 
 
-def _borrar_recuadro(imagen, abajo):
-    """Pinta COLOR_AREA donde estaba el recuadro (con su sombra) y funde sus orillas."""
-    mascara = Image.new('L', imagen.size, 0)
-    inicio_arriba = ALTO_ARRIBA - FUNDIDO_ARRIBA
-    for y in range(inicio_arriba, FIN_SOMBRA + FUNDIDO_ABAJO):
-        if y < ALTO_ARRIBA:
-            alfa = round(255 * (y - inicio_arriba) / FUNDIDO_ARRIBA)
-        elif y <= FIN_SOMBRA:
-            alfa = 255
-        else:
-            alfa = round(255 * (1 - (y - FIN_SOMBRA) / FUNDIDO_ABAJO))
-        mascara.paste(alfa, (ANCHO_IZQUIERDA, y, ANCHO, y + 1))
-    # Orilla derecha de la pieza izquierda (solo fondo claro, el arco verde
-    # termina antes), a la altura del area.
-    for x in range(ANCHO_IZQUIERDA - FUNDIDO_IZQUIERDA, ANCHO_IZQUIERDA):
-        alfa = round(255 * (x - (ANCHO_IZQUIERDA - FUNDIDO_IZQUIERDA)) / FUNDIDO_IZQUIERDA)
-        mascara.paste(alfa, (x, ALTO_ARRIBA, x + 1, abajo))
-    return Image.composite(Image.new('RGB', imagen.size, COLOR_AREA), imagen, mascara)
+def _ondas_del_medio(imagen, abajo):
+    """La franja sin la foto: a la izquierda, las ondas de la derecha en espejo."""
+    medio = imagen.crop((0, ALTO_ARRIBA, ANCHO, abajo))
+    espejo = imagen.crop((ANCHO_IZQUIERDA, ALTO_ARRIBA, ANCHO_IZQUIERDA * 2, abajo))
+    medio.paste(ImageOps.mirror(espejo), (0, 0))
+    # Word deja ver 1 px del fondo bajo la foto (el parrafo que exige tras la
+    # tabla): las ultimas filas son las de la foto para que no se note esa linea.
+    union = imagen.crop((0, abajo - FILAS_UNION, ANCHO_IZQUIERDA, abajo))
+    medio.paste(union, (0, ALTO_MEDIO - FILAS_UNION))
+    return medio
 
 
 def main():
     imagen = Image.open(os.path.join(CARPETA, 'original.png')).convert('RGB').resize((ANCHO, ALTO), Image.LANCZOS)
     abajo = ALTO_ARRIBA + ALTO_MEDIO
-    imagen = _borrar_recuadro(imagen, abajo)
     piezas = {
-        'fondo_arriba': (0, 0, ANCHO, ALTO_ARRIBA),
-        'fondo_izquierda': (0, ALTO_ARRIBA, ANCHO_IZQUIERDA, abajo),
-        'fondo_abajo': (0, abajo, ANCHO, ALTO),
+        'fondo_arriba': imagen.crop((0, 0, ANCHO, ALTO_ARRIBA)),
+        'fondo_izquierda': imagen.crop((0, ALTO_ARRIBA, ANCHO_IZQUIERDA, abajo)),
+        'fondo_medio': _ondas_del_medio(imagen, abajo),
+        'fondo_abajo': imagen.crop((0, abajo, ANCHO, ALTO)),
     }
-    for nombre, caja in piezas.items():
-        pieza = imagen.crop(caja)
-        if nombre == 'fondo_izquierda':
-            # Las primeras filas traen la orilla inferior de "EVALUACIONES".
-            # Con texto largo esta pieza baja y esa orilla quedaria suelta a
-            # media altura: se tapa repitiendo una fila limpia de abajo.
-            limpia = pieza.crop((0, FILAS_TITULO, pieza.width, FILAS_TITULO + 1))
-            for y in range(FILAS_TITULO):
-                pieza.paste(limpia, (0, y))
+    for nombre, pieza in piezas.items():
         pieza.save(os.path.join(CARPETA, f'{nombre}.jpg'), quality=85, optimize=True)
 
 

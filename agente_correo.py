@@ -58,7 +58,9 @@ PUERTO = 8877
 #   8 -- el buzon remitente se busca por correo y por nombre, entre cuentas,
 #        buzones abiertos y la libreta global; si no esta abierto en Outlook
 #        se envia igual "en nombre de" (Exchange valida el permiso).
-VERSION = 8
+#   9 -- nueva imagen del fondo (Sistema de Capacitaciones), con las ondas
+#        detras del texto.
+VERSION = 9
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -84,7 +86,7 @@ _candado_outlook = threading.Lock()
 # .exe de PyInstaller los datos viven en sys._MEIPASS, no junto al script.
 _CARPETA_FONDO = os.path.join(
     getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'fondo_correo')
-_PIEZAS_FONDO = ('fondo_arriba', 'fondo_izquierda', 'fondo_abajo')
+_PIEZAS_FONDO = ('fondo_arriba', 'fondo_izquierda', 'fondo_medio', 'fondo_abajo')
 
 
 def _envolver_en_fondo(cuerpo_html):
@@ -93,11 +95,13 @@ def _envolver_en_fondo(cuerpo_html):
     Regresa (html, [(ruta, cid), ...]) con las piezas a adjuntar en linea; si
     faltan las piezas, regresa el cuerpo tal cual para no dejar de enviar.
 
-    Va con tablas e <img> en vez de background-image porque Outlook de
-    escritorio no muestra fondos CSS. El recuadro es una tabla interna del
-    tamano del texto, centrada en el area donde va el recuadro de la imagen;
-    con texto largo el area crece. La foto de la izquierda se alinea abajo
-    para seguir pegada a las ondas de la pieza inferior.
+    Va con tablas e <img> porque el texto de cada correo mide distinto. Las
+    ondas de la franja del medio van dos veces: como fondo CSS y como fondo
+    VML, porque Outlook de escritorio (motor de Word) solo entiende el
+    segundo. Es UN solo fondo detras de foto y texto porque en Word el VML
+    solo crece con su propio contenido. El recuadro es una tabla interna del
+    tamano del texto; con texto largo la franja crece y la foto se alinea
+    abajo para seguir pegada a las ondas de la pieza inferior.
     """
     rutas = [(os.path.join(_CARPETA_FONDO, f'{cid}.jpg'), cid) for cid in _PIEZAS_FONDO]
     if not all(os.path.isfile(ruta) for ruta, _ in rutas):
@@ -108,29 +112,46 @@ def _envolver_en_fondo(cuerpo_html):
     contenido = cuerpo.group(1) if cuerpo else cuerpo_html
 
     html = (
-        '<html><head><meta charset="utf-8"></head>'
+        '<html xmlns:v="urn:schemas-microsoft-com:vml"><head><meta charset="utf-8"></head>'
         '<body style="margin:0;padding:0;background:#ffffff;">'
         '<table role="presentation" width="800" cellpadding="0" cellspacing="0" border="0" '
-        'style="width:800px;border-collapse:collapse;background:#eaf5f3;">'
-        '<tr><td colspan="3" style="padding:0;line-height:0;font-size:0;">'
-        '<img src="cid:fondo_arriba" width="800" height="105" alt="Sistema de Constancias de Evaluaciones" '
+        'style="width:800px;border-collapse:collapse;background:#f3faf9;">'
+        '<tr><td style="padding:0;line-height:0;font-size:0;">'
+        '<img src="cid:fondo_arriba" width="800" height="105" alt="Sistema de Capacitaciones" '
         'style="display:block;border:0;width:800px;height:105px;"></td></tr>'
-        '<tr>'
-        '<td width="348" valign="bottom" bgcolor="#e8f5f4" '
-        'style="width:348px;padding:0;line-height:0;font-size:0;vertical-align:bottom;background:#e8f5f4;">'
-        '<img src="cid:fondo_izquierda" width="348" height="338" alt="" '
-        'style="display:block;border:0;width:348px;height:338px;"></td>'
-        '<td width="427" height="338" align="center" valign="middle" bgcolor="#f3faf9" '
-        'style="width:427px;height:338px;vertical-align:middle;text-align:center;background:#f3faf9;padding:12px 0;">'
+        '<tr><td width="800" bgcolor="#f3faf9" background="cid:fondo_medio" '
+        'style="width:800px;padding:0;background-color:#f3faf9;'
+        'background-image:url(cid:fondo_medio);background-size:100% 100%;">'
+        '<!--[if gte mso 9]><v:rect fill="true" stroke="false" style="width:600pt;height:253.5pt;">'
+        '<v:fill type="frame" src="cid:fondo_medio" />'
+        '<v:textbox inset="0,0,0,0" style="mso-fit-shape-to-text:true">'
+        '<div style="font-size:1px;line-height:1px;mso-line-height-rule:exactly;"><![endif]-->'
+        '<table role="presentation" width="800" cellpadding="0" cellspacing="0" border="0" '
+        'style="width:800px;border-collapse:collapse;">'
+        '<tr style="height:338px;">'
+        '<td width="360" height="338" valign="bottom" '
+        'style="width:360px;height:338px;padding:0;line-height:0;font-size:0;vertical-align:bottom;">'
+        '<img src="cid:fondo_izquierda" width="360" height="338" alt="" '
+        'style="display:block;border:0;width:360px;height:338px;"></td>'
+        '<td width="440" align="center" valign="middle" '
+        'style="width:440px;padding:0 25px 0 0;vertical-align:middle;text-align:center;">'
         '<table role="presentation" cellpadding="0" cellspacing="0" border="0" align="center" '
         'style="border-collapse:separate;margin:0 auto;">'
+        # Filas y no padding: Word aplica el padding vertical de una celda a
+        # toda la fila, y eso despegaria la foto de las piezas de arriba y abajo.
+        '<tr><td height="12" style="height:12px;padding:0;font-size:1px;line-height:1px;mso-line-height-rule:exactly;">&nbsp;</td></tr>'
         '<tr><td align="left" bgcolor="#ffffff" '
         'style="background:#ffffff;border:1px solid #3b8e80;border-radius:14px;padding:20px 24px;text-align:left;'
         'font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222222;line-height:1.5;">'
-        f'{contenido}</td></tr></table></td>'
-        '<td width="25" bgcolor="#f3faf9" style="width:25px;padding:0;background:#f3faf9;">&nbsp;</td>'
-        '</tr>'
-        '<tr><td colspan="3" style="padding:0;line-height:0;font-size:0;">'
+        f'{contenido}</td></tr>'
+        '<tr><td height="12" style="height:12px;padding:0;font-size:1px;line-height:1px;mso-line-height-rule:exactly;">&nbsp;</td></tr>'
+        '</table></td></tr></table>'
+        # Word exige un parrafo tras la tabla: de 1 px para que la foto siga
+        # pegada a la pieza de abajo.
+        '<!--[if gte mso 9]><p style="margin:0;font-size:1px;line-height:1px;mso-line-height-rule:exactly;">&nbsp;</p>'
+        '</div></v:textbox></v:rect><![endif]-->'
+        '</td></tr>'
+        '<tr><td style="padding:0;line-height:0;font-size:0;">'
         '<img src="cid:fondo_abajo" width="800" height="90" alt="" '
         'style="display:block;border:0;width:800px;height:90px;"></td></tr>'
         '</table></body></html>'
