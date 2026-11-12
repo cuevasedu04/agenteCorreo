@@ -60,7 +60,11 @@ PUERTO = 8877
 #        se envia igual "en nombre de" (Exchange valida el permiso).
 #   9 -- nueva imagen del fondo (Sistema de Capacitaciones), con las ondas
 #        detras del texto.
-VERSION = 9
+#  10 -- con_fondo=0 y con_formato=1: el correo sale SIN el fondo institucional
+#        pero en HTML, conservando el formato del editor (negritas, cursivas,
+#        tamanos, colores, listas...). Sin con_formato se mantiene el texto
+#        plano de la version 7.
+VERSION = 10
 
 app = Flask(__name__)
 # Sin restriccion de origen ni de headers: el sistema web puede estar
@@ -87,6 +91,22 @@ _candado_outlook = threading.Lock()
 _CARPETA_FONDO = os.path.join(
     getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__))), 'fondo_correo')
 _PIEZAS_FONDO = ('fondo_arriba', 'fondo_izquierda', 'fondo_medio', 'fondo_abajo')
+
+
+def _html_sin_fondo(cuerpo_html):
+    """
+    Cuerpo del editor como documento HTML, sin el fondo institucional. Lleva la
+    misma letra base que el recuadro del fondo (Arial 14 px) para que lo que no
+    tenga formato propio se vea igual; negritas, colores, tamanos, etc. del
+    editor se respetan porque van dentro del propio HTML.
+    """
+    if re.search(r'<body[^>]*>', cuerpo_html, re.I):
+        return cuerpo_html  # Plantilla escrita como documento completo.
+    return (
+        '<html><head><meta charset="utf-8"></head><body>'
+        '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#222222;line-height:1.5;">'
+        f'{cuerpo_html}</div></body></html>'
+    )
 
 
 def _envolver_en_fondo(cuerpo_html):
@@ -182,6 +202,8 @@ def enviar():
     # Version 7: con_fondo=0 -> texto plano (el sistema manda cuerpo_texto ya convertido).
     texto_plano = (request.form.get('con_fondo') or '1').strip() == '0'
     cuerpo_texto = request.form.get('cuerpo_texto') or ''
+    # Version 10: sin fondo pero con el formato del editor (HTML).
+    con_formato = (request.form.get('con_formato') or '0').strip() == '1'
 
     if not destinatario:
         return jsonify({'status': 'error', 'mensaje': 'Falta el destinatario.'}), 400
@@ -209,7 +231,8 @@ def enviar():
         try:
             with _candado_outlook:
                 _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline,
-                                    cuerpo_texto if texto_plano else None)
+                                    cuerpo_texto if texto_plano and not con_formato else None,
+                                    sin_fondo=texto_plano)
         except ErrorEnvioCorreo as exc:
             return jsonify({'status': 'error', 'mensaje': str(exc)}), 502
 
@@ -217,7 +240,7 @@ def enviar():
 
 
 def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf=None, rutas_inline=(),
-                        cuerpo_texto=None):
+                        cuerpo_texto=None, sin_fondo=False):
     """
     Mismo patron que el script existente de RH para recibos de nomina
     (recibos_nomina.py): buzon compartido via SentOnBehalfOfName, adjunto
@@ -239,13 +262,13 @@ def _enviar_por_outlook(destinatario, asunto, cuerpo_html, cuenta_remitente, rut
     pythoncom.CoInitialize()
     try:
         _enviar_con_com(win32com.client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline,
-                        cuerpo_texto)
+                        cuerpo_texto, sin_fondo)
     finally:
         pythoncom.CoUninitialize()
 
 
 def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_remitente, ruta_pdf, rutas_inline=(),
-                    cuerpo_texto=None):
+                    cuerpo_texto=None, sin_fondo=False):
     try:
         outlook = win32com_client.Dispatch('Outlook.Application')
     except Exception as exc:
@@ -272,6 +295,10 @@ def _enviar_con_com(win32com_client, destinatario, asunto, cuerpo_html, cuenta_r
             mail.BodyFormat = 1  # olFormatPlain
             mail.Body = cuerpo_texto
             rutas_cid = []
+        elif sin_fondo:
+            # Version 10: HTML con el formato del editor, sin el fondo.
+            mail.HTMLBody = _html_sin_fondo(cuerpo_html)
+            rutas_cid = list(rutas_inline)
         else:
             cuerpo_html, rutas_fondo = _envolver_en_fondo(cuerpo_html)
             mail.HTMLBody = cuerpo_html
